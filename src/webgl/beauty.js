@@ -1,5 +1,109 @@
 window.onload = function() {
   let copyVideo = false;
+  let selectKernel = 'normal';
+
+  const kernels = {
+    normal: [
+      0, 0, 0,
+      0, 1, 0,
+      0, 0, 0
+    ],
+    gaussianBlur: [
+      0.045, 0.122, 0.045,
+      0.122, 0.332, 0.122,
+      0.045, 0.122, 0.045
+    ],
+    gaussianBlur2: [
+      1, 2, 1,
+      2, 4, 2,
+      1, 2, 1
+    ],
+    gaussianBlur3: [
+      0, 1, 0,
+      1, 1, 1,
+      0, 1, 0
+    ],
+    unsharpen: [
+      -1, -1, -1,
+      -1,  9, -1,
+      -1, -1, -1
+    ],
+    sharpness: [
+       0,-1, 0,
+      -1, 5,-1,
+       0,-1, 0
+    ],
+    sharpen: [
+       -1, -1, -1,
+       -1, 16, -1,
+       -1, -1, -1
+    ],
+    edgeDetect: [
+       -0.125, -0.125, -0.125,
+       -0.125,  1,     -0.125,
+       -0.125, -0.125, -0.125
+    ],
+    edgeDetect2: [
+       -1, -1, -1,
+       -1,  8, -1,
+       -1, -1, -1
+    ],
+    edgeDetect3: [
+       -5, 0, 0,
+        0, 0, 0,
+        0, 0, 5
+    ],
+    edgeDetect4: [
+       -1, -1, -1,
+        0,  0,  0,
+        1,  1,  1
+    ],
+    edgeDetect5: [
+       -1, -1, -1,
+        2,  2,  2,
+       -1, -1, -1
+    ],
+    edgeDetect6: [
+       -5, -5, -5,
+       -5, 39, -5,
+       -5, -5, -5
+    ],
+    sobelHorizontal: [
+        1,  2,  1,
+        0,  0,  0,
+       -1, -2, -1
+    ],
+    sobelVertical: [
+        1,  0, -1,
+        2,  0, -2,
+        1,  0, -1
+    ],
+    previtHorizontal: [
+        1,  1,  1,
+        0,  0,  0,
+       -1, -1, -1
+    ],
+    previtVertical: [
+        1,  0, -1,
+        1,  0, -1,
+        1,  0, -1
+    ],
+    boxBlur: [
+        0.111, 0.111, 0.111,
+        0.111, 0.111, 0.111,
+        0.111, 0.111, 0.111
+    ],
+    triangleBlur: [
+        0.0625, 0.125, 0.0625,
+        0.125,  0.25,  0.125,
+        0.0625, 0.125, 0.0625
+    ],
+    emboss: [
+       -2, -1,  0,
+       -1,  1,  1,
+        0,  1,  2
+    ],
+  }
 
   function initShaderProgram(gl, vsSource, fsSource) {
     const vertexShader = initShader(gl, gl.VERTEX_SHADER, vsSource);
@@ -137,6 +241,33 @@ window.onload = function() {
     })
   }
 
+  function setupFilters() {
+    const select = document.getElementById('filters');
+    Object.keys(kernels).forEach(item => {
+      const option = document.createElement('option');
+      option.value = item;
+      option.innerText = item;
+      if (item === selectKernel) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    })
+
+    select.onchange = function(e) {
+      selectKernel = e.target.value;
+    }
+  }
+
+  function setupImage() {
+    const image = new Image();
+    image.src = 'cubetexture.png';
+    return new Promise(resolve => {
+      image.onload = function(){
+        resolve(image)
+      }
+    })
+  }
+
   function setupVideo() {
     const video = document.createElement('video');
     video.id = 'original-video';
@@ -174,7 +305,7 @@ window.onload = function() {
     return video;
   }
 
-  function drawScene(gl, programInfo, buffers, texture) {
+  function drawScene(gl, programInfo, buffers, texture, video) {
     gl.clearColor(0.0, 0.0, 0.0, 1.0);
     gl.clearDepth(1.0);
     gl.enable(gl.DEPTH_TEST);
@@ -232,11 +363,24 @@ window.onload = function() {
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.uniform1i(programInfo.uniformLocations.uSampler, 0);
 
+    gl.uniform2f(programInfo.uniformLocations.uTextureSize, video.width, video.height);
+
+    const kernel = kernels[selectKernel];
+    gl.uniform1fv(programInfo.uniformLocations.kernelLocation, kernel);
+    gl.uniform1f(programInfo.uniformLocations.kernelWeightLocation, computeKernelWeight(kernel));
+
     {
       const offset = 0;
       const vertexCount = 4;
       gl.drawArrays(gl.TRIANGLE_STRIP, offset, vertexCount);
     }
+  }
+
+  function computeKernelWeight(kernel) {
+    const weight = kernel.reduce(function(prev, cur) {
+      return prev + cur;
+    });
+    return weight <= 0 ? 1 : weight;
   }
 
   function main() {
@@ -263,16 +407,59 @@ window.onload = function() {
       }
     `
 
-    // 片段着色器
-    const fsSource = `
-      varying highp vec2 vTextureCoord;
+    const fsSource = `precision mediump float;
 
+      // 纹理
       uniform sampler2D uSampler;
+      uniform vec2 u_textureSize;
+      uniform float u_kernel[9];
+      uniform float u_kernelWeight;
+
+      // 从顶点着色器传入的纹理坐标
+      varying vec2 vTextureCoord;
+
+      const float saturation = 0.5;
 
       void main() {
-        gl_FragColor = texture2D(uSampler, vTextureCoord).bgra;
+        vec4 color = texture2D(uSampler, vTextureCoord);
+        float average = (color.r + color.g + color.b) / 3.0;
+        if (saturation > 0.0) {
+          color.rgb += (average - color.rgb) * (1.0 - 1.0 / (1.001 - saturation));
+        } else {
+          color.rgb += (average - color.rgb) * (-saturation);
+        }
+        gl_FragColor = color;
       }
     `
+    // const fsSource = `precision mediump float;
+
+    //   // 纹理
+    //   uniform sampler2D uSampler;
+    //   uniform vec2 u_textureSize;
+    //   uniform float u_kernel[9];
+    //   uniform float u_kernelWeight;
+
+    //   // 从顶点着色器传入的纹理坐标
+    //   varying vec2 vTextureCoord;
+
+    //   void main() {
+    //     vec2 onePixel = vec2(1.0, 1.0) / u_textureSize;
+    //     vec4 colorSum =
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2(-1, -1)) * u_kernel[0] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2( 0, -1)) * u_kernel[1] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2( 1, -1)) * u_kernel[2] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2(-1,  0)) * u_kernel[3] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2( 0,  0)) * u_kernel[4] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2( 1,  0)) * u_kernel[5] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2(-1,  1)) * u_kernel[6] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2( 0,  1)) * u_kernel[7] +
+    //       texture2D(uSampler, vTextureCoord + onePixel * vec2( 1,  1)) * u_kernel[8] ;
+
+    //     // 只把rgb值求和除以权重
+    //     // 将阿尔法值设为 1.0
+    //     gl_FragColor = vec4((colorSum / u_kernelWeight).rgb, 1.0);
+    //   }
+    // `
 
     const shaderProgram = initShaderProgram(gl, vsSource, fsSource);
 
@@ -285,26 +472,39 @@ window.onload = function() {
       uniformLocations: {
         projectionMatrix: gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'),
         modelViewMatrix: gl.getUniformLocation(shaderProgram, 'uModelViewMatrix'),
+        kernelLocation: gl.getUniformLocation(shaderProgram, 'u_kernel[0]'),
+        kernelWeightLocation: gl.getUniformLocation(shaderProgram, 'u_kernelWeight'),
         uSampler: gl.getUniformLocation(shaderProgram, 'uSampler'),
+        uTextureSize: gl.getUniformLocation(shaderProgram, 'u_textureSize'),
       },
     }
+
+
 
     const buffers = initBuffers(gl);
     const texture = initTexture(gl);
     setupCameras();
-    const video = setupVideo();
+    setupFilters();
 
+    // 视频处理
+    const video = setupVideo();
     // Draw the scene repeatedly
     function render() {
       if (copyVideo) {
         updateTexture(gl, texture, video);
       }
 
-      drawScene(gl, programInfo, buffers, texture);
+      drawScene(gl, programInfo, buffers, texture, video);
 
       requestAnimationFrame(render);
     }
     requestAnimationFrame(render);
+
+    // 图片处理
+    // setupImage().then(img => {
+    //   updateTexture(gl, texture, img);
+    //   drawScene(gl, programInfo, buffers, texture, img);
+    // })
   }
 
   main();
